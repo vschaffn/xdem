@@ -30,6 +30,9 @@ relies on [Rasterio](https://github.com/rasterio/rasterio), [GeoPandas](https://
 for georeferenced calculations, and on [NumPy](https://github.com/numpy/numpy) and [Xarray](https://github.com/pydata/xarray) for numerical analysis. It allows easy access to
 the functionalities of these packages through interfacing or composition, and quick inter-operability through object conversion.
 
+The RichDEM tool, distributed  under the GNU GPL v3.0 license, is used solely for testing purposes and is not required 
+for the operation of xDEM. The xDEM tool itself is distributed under the MIT license
+
 If you are looking for an accessible Python package to write the Python equivalent of your [GDAL](https://gdal.org/) command lines, or of your
 [QGIS](https://www.qgis.org/en/site/) analysis pipeline **without a steep learning curve** on Python GIS syntax, xDEM is perfect for you! For more advanced
 users, xDEM also aims at being efficient and scalable by supporting lazy loading and parallel computing (ongoing).
