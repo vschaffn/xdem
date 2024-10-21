@@ -8,9 +8,11 @@ import warnings
 import geoutils as gu
 import numpy as np
 import pytest
+import richdem as rd
+from geoutils.raster import RasterType
 
 import xdem
-from xdem._typing import MArrayf
+from xdem._typing import MArrayf, NDArrayf
 
 xdem.examples.download_longyearbyen_examples()
 
@@ -190,6 +192,158 @@ class TestTerrainAttribute:
         :param attribute: The attribute to test (e.g. 'slope')
         """
 
+        def _raster_to_rda(rst: RasterType) -> rd.rdarray:
+            """
+            Get georeferenced richDEM array from geoutils.Raster
+            :param rst: DEM as raster
+            :return: DEM
+            """
+            arr = rst.data.filled(rst.nodata).squeeze()
+            rda = rd.rdarray(arr, no_data=rst.nodata)
+            rda.geotransform = rst.transform.to_gdal()
+
+            return rda
+
+        def _get_terrainattr_richdem(rst: RasterType, attribute: str = "slope_radians") -> NDArrayf:
+            """
+            Derive terrain attribute for DEM opened with rasterio. One of "slope_degrees", "slope_percentage", "aspect",
+            "profile_curvature", "planform_curvature", "curvature" and others (see RichDEM documentation).
+            :param rst: DEM as raster
+            :param attribute: RichDEM terrain attribute
+            :return:
+            """
+            rda = _raster_to_rda(rst)
+            terrattr = rd.TerrainAttribute(rda, attrib=attribute)
+            terrattr[terrattr == terrattr.no_data] = np.nan
+
+            return np.array(terrattr)
+
+        def get_terrain_attribute_richdem(
+                dem: NDArrayf | MArrayf | RasterType,
+                attribute: str | list[str],
+                degrees: bool = True,
+                hillshade_altitude: float = 45.0,
+                hillshade_azimuth: float = 315.0,
+                hillshade_z_factor: float = 1.0,
+        ) -> NDArrayf | list[NDArrayf] | RasterType | list[RasterType]:
+            """
+            Derive one or multiple terrain attributes from a DEM using Richdem.
+
+            Attributes:
+            * 'slope': The slope in degrees or radians (degs: 0=flat, 90=vertical). Default method: "Horn".
+            * 'aspect': The slope aspect in degrees or radians (degs: 0=N, 90=E, 180=S, 270=W).
+            * 'hillshade': The shaded slope in relation to its aspect.
+            * 'curvature': The second derivative of elevation (the rate of slope change per pixel), multiplied by 100.
+            * 'planform_curvature': The curvature perpendicular to the direction of the slope, multiplied by 100.
+            * 'profile_curvature': The curvature parallel to the direction of the slope, multiplied by 100.
+
+            :param dem: The DEM to analyze.
+            :param attribute: The terrain attribute(s) to calculate.
+            :param resolution: The X/Y or (X, Y) resolution of the DEM.
+            :param degrees: Convert radians to degrees?
+            :param hillshade_altitude: The shading altitude in degrees (0-90°). 90° is straight from above.
+            :param hillshade_azimuth: The shading azimuth in degrees (0-360°) going clockwise, starting from north.
+            :param hillshade_z_factor: Vertical exaggeration factor.
+
+            :raises ValueError: If the inputs are poorly formatted or are invalid.
+
+            :returns: One or multiple arrays of the requested attribute(s)
+            """
+
+            # Validate and format the inputs
+            if isinstance(attribute, str):
+                attribute = [attribute]
+
+            if not isinstance(dem, gu.Raster):
+                # Here, maybe we could pass the geotransform based on the resolution, and add a "default" projection as
+                # this is mandated but likely not used by the rdarray format of RichDEM...
+                # For now, not supported
+                raise ValueError("To derive RichDEM attributes, the DEM passed must be a Raster object")
+
+            if (hillshade_azimuth < 0.0) or (hillshade_azimuth > 360.0):
+                raise ValueError(
+                    f"Azimuth must be a value between 0 and 360 degrees (given value: {hillshade_azimuth})")
+            if (hillshade_altitude < 0.0) or (hillshade_altitude > 90):
+                raise ValueError("Altitude must be a value between 0 and 90 degrees (given value: {altitude})")
+            if (hillshade_z_factor < 0.0) or not np.isfinite(hillshade_z_factor):
+                raise ValueError(f"z_factor must be a non-negative finite value (given value: {hillshade_z_factor})")
+
+            # Initialize the terrain_attributes dictionary, which will be filled with the requested values.
+            terrain_attributes: dict[str, NDArrayf] = {}
+
+            # Check which products should be made to optimize the processing
+            make_aspect = any(attr in attribute for attr in ["aspect", "hillshade"])
+            make_slope = any(
+                attr in attribute
+                for attr in
+                ["slope", "hillshade", "planform_curvature", "aspect", "profile_curvature", "maximum_curvature"]
+            )
+            make_hillshade = "hillshade" in attribute
+            make_curvature = "curvature" in attribute
+            make_planform_curvature = "planform_curvature" in attribute or "maximum_curvature" in attribute
+            make_profile_curvature = "profile_curvature" in attribute or "maximum_curvature" in attribute
+
+            if make_slope:
+                terrain_attributes["slope"] = _get_terrainattr_richdem(dem, attribute="slope_radians")
+
+            if make_aspect:
+                # The aspect of RichDEM is returned in degrees, we convert to radians to match the others
+                terrain_attributes["aspect"] = np.deg2rad(_get_terrainattr_richdem(dem, attribute="aspect"))
+                # For flat slopes, RichDEM returns a 90° aspect by default, while GDAL return a 180° aspect
+                # We stay consistent with GDAL
+                slope_tmp = _get_terrainattr_richdem(dem, attribute="slope_radians")
+                terrain_attributes["aspect"][slope_tmp == 0] = np.pi
+
+            if make_hillshade:
+                # If a different z-factor was given, slopemap with exaggerated gradients.
+                if hillshade_z_factor != 1.0:
+                    slopemap = np.arctan(np.tan(terrain_attributes["slope"]) * hillshade_z_factor)
+                else:
+                    slopemap = terrain_attributes["slope"]
+
+                azimuth_rad = np.deg2rad(360 - hillshade_azimuth)
+                altitude_rad = np.deg2rad(hillshade_altitude)
+
+                # The operation below yielded the closest hillshade to GDAL (multiplying by 255 did not work)
+                # As 0 is generally no data for this uint8, we add 1 and then 0.5 for the rounding to occur between 1 and 255
+                terrain_attributes["hillshade"] = np.clip(
+                    1.5
+                    + 254
+                    * (
+                            np.sin(altitude_rad) * np.cos(slopemap)
+                            + np.cos(altitude_rad) * np.sin(slopemap) * np.sin(
+                        azimuth_rad - terrain_attributes["aspect"])
+                    ),
+                    0,
+                    255,
+                ).astype("float32")
+
+            if make_curvature:
+                terrain_attributes["curvature"] = _get_terrainattr_richdem(dem, attribute="curvature")
+
+            if make_planform_curvature:
+                terrain_attributes["planform_curvature"] = _get_terrainattr_richdem(dem, attribute="planform_curvature")
+
+            if make_profile_curvature:
+                terrain_attributes["profile_curvature"] = _get_terrainattr_richdem(dem, attribute="profile_curvature")
+
+            # Convert the unit if wanted.
+            if degrees:
+                for attr in ["slope", "aspect"]:
+                    if attr not in terrain_attributes:
+                        continue
+                    terrain_attributes[attr] = np.rad2deg(terrain_attributes[attr])
+
+            output_attributes = [terrain_attributes[key].reshape(dem.shape) for key in attribute]
+
+            if isinstance(dem, gu.Raster):
+                output_attributes = [
+                    gu.Raster.from_array(attr, transform=dem.transform, crs=dem.crs, nodata=-99999)
+                    for attr in output_attributes
+                ]
+
+            return output_attributes if len(output_attributes) > 1 else output_attributes[0]
+
         # Functions for xdem-implemented methods
         functions_xdem = {
             "slope_Horn": lambda dem: xdem.terrain.slope(dem, resolution=dem.res, degrees=True),
@@ -202,12 +356,12 @@ class TestTerrainAttribute:
 
         # Functions for RichDEM wrapper methods
         functions_richdem = {
-            "slope_Horn": lambda dem: xdem.terrain.slope(dem, degrees=True, use_richdem=True),
-            "aspect_Horn": lambda dem: xdem.terrain.aspect(dem, degrees=True, use_richdem=True),
-            "hillshade_Horn": lambda dem: xdem.terrain.hillshade(dem, use_richdem=True),
-            "curvature": lambda dem: xdem.terrain.curvature(dem, use_richdem=True),
-            "profile_curvature": lambda dem: xdem.terrain.profile_curvature(dem, use_richdem=True),
-            "planform_curvature": lambda dem: xdem.terrain.planform_curvature(dem, use_richdem=True),
+            "slope_Horn": lambda dem: get_terrain_attribute_richdem(dem, attribute="slope", degrees=True),
+            "aspect_Horn": lambda dem: get_terrain_attribute_richdem(dem, attribute="aspect", degrees=True),
+            "hillshade_Horn": lambda dem: get_terrain_attribute_richdem(dem, attribute="hillshade"),
+            "curvature": lambda dem: get_terrain_attribute_richdem(dem, attribute="curvature"),
+            "profile_curvature": lambda dem: get_terrain_attribute_richdem(dem, attribute="profile_curvature"),
+            "planform_curvature": lambda dem: get_terrain_attribute_richdem(dem, attribute="planform_curvature", degrees=True),
         }
 
         # Copy the DEM to ensure that the inter-test state is unchanged, and because the mask will be modified.
