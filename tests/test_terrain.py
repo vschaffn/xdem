@@ -239,7 +239,6 @@ class TestTerrainAttribute:
 
             :param dem: The DEM to analyze.
             :param attribute: The terrain attribute(s) to calculate.
-            :param resolution: The X/Y or (X, Y) resolution of the DEM.
             :param degrees: Convert radians to degrees?
             :param hillshade_altitude: The shading altitude in degrees (0-90°). 90° is straight from above.
             :param hillshade_azimuth: The shading azimuth in degrees (0-360°) going clockwise, starting from north.
@@ -509,15 +508,6 @@ class TestTerrainAttribute:
         """Test the get_terrain_attribute function raises appropriate errors."""
 
         # Below, re.escape() is needed to match expressions that have special characters (e.g., parenthesis, bracket)
-        with pytest.raises(
-            ValueError,
-            match=re.escape("RichDEM can only compute the slope and aspect using the " "default method of Horn (1981)"),
-        ):
-            xdem.terrain.slope(self.dem, method="ZevenbergThorne", use_richdem=True)
-
-        with pytest.raises(ValueError, match="To derive RichDEM attributes, the DEM passed must be a Raster object"):
-            xdem.terrain.slope(self.dem.data, resolution=self.dem.res, use_richdem=True)
-
         with pytest.raises(
             ValueError,
             match=re.escape(
